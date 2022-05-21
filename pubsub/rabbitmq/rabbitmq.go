@@ -22,11 +22,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streadway/amqp"
-
 	"github.com/dapr/components-contrib/pubsub"
+	"github.com/dapr/components-contrib/shared"
 	"github.com/dapr/kit/logger"
 	"github.com/dapr/kit/retry"
+	"github.com/streadway/amqp"
 )
 
 const (
@@ -98,26 +98,6 @@ type rabbitMQChannelBroker interface {
 // interface used to allow unit testing.
 type rabbitMQConnectionBroker interface {
 	Close() error
-}
-
-type ErrorCollection struct {
-	errors []error
-	mux    sync.Mutex
-}
-
-func (c *ErrorCollection) Append(e error, stopCh chan struct{}) {
-	c.mux.Lock()
-	if len(c.errors) == 0 {
-		close(stopCh)
-	}
-	c.errors = append(c.errors, e)
-	c.mux.Unlock()
-}
-
-func (c *ErrorCollection) GetErrors() []error {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-	return c.errors
 }
 
 // NewRabbitMQ creates a new RabbitMQ pub/sub.
@@ -458,19 +438,18 @@ func (r *rabbitMQ) listenMessages(channel rabbitMQChannelBroker, msgs <-chan amq
 			}
 		}
 	case pubsub.Parallel:
-		ec := ErrorCollection{errors: []error{}}
-		stopCh := make(chan struct{})
+		ec := shared.NewErrorCollection()
 		var wg sync.WaitGroup
 		for {
 			select {
-			case <-stopCh:
+			case <-ec.ErrNotify:
 				wg.Wait()
 				return ec.GetErrors()
 			case d := <-msgs:
 				wg.Add(1)
 				go func(channel rabbitMQChannelBroker, d amqp.Delivery, topic string, handler pubsub.Handler) {
 					if e := r.handleMessage(channel, d, topic, handler); e != nil && mustReconnect(channel, []error{e}) {
-						ec.Append(e, stopCh)
+						ec.Append(e)
 					}
 					wg.Done()
 				}(channel, d, topic, handler)
